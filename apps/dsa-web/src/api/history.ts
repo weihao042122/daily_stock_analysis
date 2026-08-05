@@ -10,6 +10,7 @@ import type {
   RunDiagnosticSummary,
   StockBarResponse,
 } from '../types/analysis';
+import type { RunFlowSnapshot } from '../types/runFlow';
 
 // ============ API 接口 ============
 
@@ -82,12 +83,32 @@ export const historyApi = {
   },
 
   /**
+   * 生成历史报告分享图片
+   * @param recordId 分析历史记录主键 ID
+   */
+  getShareImage: async (recordId: number): Promise<Blob> => {
+    const response = await apiClient.get<Blob>(`/api/v1/history/${recordId}/share-image`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  },
+
+  /**
    * 获取历史报告运行诊断摘要
    * @param recordId 分析历史记录主键 ID
    */
   getDiagnostics: async (recordId: number): Promise<RunDiagnosticSummary> => {
     const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}/diagnostics`);
     return toCamelCase<RunDiagnosticSummary>(response.data);
+  },
+
+  /**
+   * 获取历史报告运行流快照
+   * @param recordId 分析历史记录主键 ID
+   */
+  getRecordFlow: async (recordId: number): Promise<RunFlowSnapshot> => {
+    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}/flow`);
+    return toCamelCase<RunFlowSnapshot>(response.data);
   },
 
   /**
