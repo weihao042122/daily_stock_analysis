@@ -30,6 +30,7 @@ except ModuleNotFoundError:
 
 from api.v1.endpoints import screening as screening_endpoint
 from src.config import Config
+from src.core.trading_calendar import build_market_phase_context
 from src.services import screening_service
 from src.services.screening import REFERENCE_REVISION
 from src.services.screening.config import Config as ScreeningPipelineConfig
@@ -111,7 +112,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             )
         with patch(
             "src.services.screening_service._enrich_candidates_with_dsa",
-            side_effect=lambda candidates: (
+            side_effect=lambda candidates, **_kwargs: (
                 candidates,
                 {
                     "enabled": True,
@@ -2567,6 +2568,9 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
 
         with (
             patch.object(daily_module, "fetch_daily_history", original_daily_fetch),
+            patch.object(daily_module, "build_market_phase_context", return_value=build_market_phase_context(
+                market="cn", current_time=datetime.fromisoformat("2026-06-03T16:00:00+08:00"),
+            )),
             _patch_screening_core(fake_module),
             patch(
                 "src.services.screening_service.get_dsa_daily_history",
@@ -2668,12 +2672,13 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
                             "code": "600519",
                             "name": "贵州茅台",
                             "score": 88.5,
+                            "dsa_events": [{"title": "最新事件", "source": "测试源", "published_date": datetime.now().date().isoformat()}],
                             "dsa_context": {
                                 "enriched": True,
                                 "quote": {"price": 1688.0, "change_pct": 1.2},
                                 "warnings": ["from_screening_provider"],
                             },
-                            "dsa_news": [{"title": "贵州茅台最新公告", "source": "测试源"}],
+                            "dsa_news": [{"title": "贵州茅台最新公告", "source": "测试源", "published_date": datetime.now().date().isoformat()}],
                             "dsa_analysis_summary": "DSA新闻: 贵州茅台最新公告",
                         }
                     ]
@@ -2717,13 +2722,14 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
                             "code": "600519",
                             "name": "贵州茅台",
                             "score": 88.5,
+                            "dsa_events": [{"title": "最新事件", "source": "测试源", "published_date": datetime.now().date().isoformat()}],
                             "dsa_context": {
                                 "enriched": True,
                                 "quote": {"price": 1688.0, "change_pct": 1.2},
                                 "news": {
                                     "success": True,
                                     "summary": "DSA新闻：贵州茅台最新公告",
-                                    "results": [{"title": "贵州茅台最新公告", "source": "测试源"}],
+                                    "results": [{"title": "贵州茅台最新公告", "source": "测试源", "published_date": datetime.now().date().isoformat()}],
                                 },
                                 "warnings": ["from_screening_provider"],
                             },
@@ -2937,9 +2943,9 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(context["llm"]["channels"][0]["extra_headers"], {"x-tenant": "dsa"})
         self.assertEqual(context["llm"]["model_list"][0]["litellm_params"]["extra_headers"], {"x-tenant": "dsa"})
         self.assertIn("get_candidate_context", context["dsa"])
-        self.assertEqual(context["dsa"]["mode"], "pre_rank_light")
+        self.assertEqual(context["dsa"]["mode"], "pre_rank_research")
         self.assertEqual(context["dsa"]["max_candidates"], 3)
-        self.assertFalse(context["dsa"]["include_news"])
+        self.assertTrue(context["dsa"]["include_news"])
         self.assertNotIn("search_stock_news", context["dsa"])
         self.assertEqual(payload["candidate_count"], 0)
 
@@ -3508,6 +3514,9 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
         cache_path = cache_dir / "000001.auto.90.json"
 
         with (
+            patch.object(daily_module, "build_market_phase_context", return_value=build_market_phase_context(
+                market="cn", current_time=datetime.fromisoformat("2026-06-03T16:00:00+08:00"),
+            )),
             patch.object(
                 daily_module,
                 "fetch_daily_history",
@@ -3608,6 +3617,141 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             env = screening_service._build_screening_runtime_env(config)
 
         self.assertEqual(env["SNAPSHOT_SOURCE_PRIORITY"], "tushare,sina,efinance,akshare_em,em_datacenter")
+
+    def test_screening_runtime_env_preserves_responses_api_surface(self) -> None:
+        config = Config(
+            screening_enabled=True,
+            litellm_model="openai/gpt-5.6-sol",
+            llm_channels=[
+                {
+                    "name": "draft",
+                    "protocol": "openai",
+                    "api_surface": "responses",
+                    "enabled": True,
+                    "base_url": "https://api.example.com/v1",
+                    "api_keys": ["sk-draft"],
+                    "models": ["openai/gpt-5.6-sol"],
+                }
+            ],
+        )
+
+        env = screening_service._build_screening_runtime_env(config)
+
+        self.assertEqual(env["LLM_DRAFT_API_SURFACE"], "responses")
+        with patch.dict(os.environ, env, clear=True):
+            runtime_config = ScreeningPipelineConfig.from_env()
+        self.assertEqual(runtime_config.llm_channels[0]["api_surface"], "responses")
+
+    def test_screening_runtime_env_skips_unknown_api_surface(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "draft",
+                "LLM_DRAFT_PROTOCOL": "openai",
+                "LLM_DRAFT_API_SURFACE": "respones",
+                "LLM_DRAFT_API_KEY": "sk-draft",
+                "LLM_DRAFT_MODELS": "gpt-5.6-sol",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels, [])
+
+    def test_screening_runtime_env_uses_provider_protocol_before_validating_surface(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "gemini",
+                "LLM_GEMINI_API_SURFACE": "responses",
+                "LLM_GEMINI_API_KEY": "gemini-key",
+                "LLM_GEMINI_MODELS": "gemini-2.5-flash",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels, [])
+
+    def test_screening_runtime_env_skips_openai_responses_channel_with_non_openai_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "draft",
+                "LLM_DRAFT_PROTOCOL": "openai",
+                "LLM_DRAFT_API_SURFACE": "responses",
+                "LLM_DRAFT_API_KEY": "sk-draft",
+                "LLM_DRAFT_MODELS": "anthropic/claude-sonnet-4-6",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels, [])
+
+    def test_screening_runtime_env_skips_openai_responses_channel_with_direct_provider_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "draft",
+                "LLM_DRAFT_PROTOCOL": "openai",
+                "LLM_DRAFT_API_SURFACE": "responses",
+                "LLM_DRAFT_API_KEY": "sk-draft",
+                "LLM_DRAFT_MODELS": "xai/grok-beta",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels, [])
+
+    def test_screening_runtime_env_skips_duplicate_route_alias_with_mixed_surfaces(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "chat,responses",
+                "LLM_CHAT_PROTOCOL": "openai",
+                "LLM_CHAT_API_KEY": "sk-chat",
+                "LLM_CHAT_MODELS": "gpt-5.6-sol",
+                "LLM_RESPONSES_PROTOCOL": "openai",
+                "LLM_RESPONSES_API_SURFACE": "responses",
+                "LLM_RESPONSES_API_KEY": "sk-responses",
+                "LLM_RESPONSES_MODELS": "gpt-5.6-sol",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels, [])
+
+    def test_screening_runtime_env_keeps_generic_channel_openai_default(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "draft",
+                "LLM_DRAFT_API_KEY": "sk-draft",
+                "LLM_DRAFT_MODELS": "gpt-5.6-sol",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels[0]["protocol"], "openai")
+
+    def test_screening_runtime_env_skips_unsupported_hermes_responses_surface(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CHANNELS": "hermes",
+                "LLM_HERMES_API_SURFACE": "responses",
+                "LLM_HERMES_API_KEY": "sk-hermes",
+                "LLM_HERMES_MODELS": "hermes-agent",
+            },
+            clear=True,
+        ):
+            runtime_config = ScreeningPipelineConfig.from_env()
+
+        self.assertEqual(runtime_config.llm_channels, [])
 
     def test_screen_preserves_explicit_candidate_context_provider_override(self) -> None:
         config = self._config(enabled=True)

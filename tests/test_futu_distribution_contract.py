@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import yaml
 
@@ -40,7 +41,7 @@ def test_futu_sdk_is_pinned_and_verified_across_linux_distributions() -> None:
         'python -c "import src.services.screening.pipeline; import futu"'
         in dockerfile
     )
-    assert "import futu" in _job_run_text(ci["jobs"]["backend-gate"])
+    assert "import futu" in _job_run_text(ci["jobs"]["backend-tests"])
     assert "import futu" in _job_run_text(ci["jobs"]["docker-build"])
     assert "import futu" in _job_run_text(daily["jobs"]["analyze"])
     assert "import futu" in _job_run_text(docker_publish["jobs"]["build-and-push"])
@@ -79,4 +80,7 @@ def test_futu_sdk_is_collected_and_probed_in_desktop_backends() -> None:
 
     assert 'Test-PythonCode -Python $pythonBin -Code "import futu"' in windows_script
     assert "'--collect-all', 'futu'" in windows_script
-    assert "@('src.services.screening.pipeline', 'futu', 'orjson')" in windows_script
+    probe = re.search(r"foreach \(\$module in @\(([^)]*)\)\)", windows_script)
+    assert probe is not None
+    probe_modules = set(re.findall(r"'([^']+)'", probe.group(1)))
+    assert {"src.services.screening.pipeline", "futu", "orjson"} <= probe_modules
